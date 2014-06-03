@@ -3,35 +3,97 @@ package finago
 //import "fmt"
 import "net"
 import "math/rand"
+import "sync"
 import "time"
 
-var connMap map[int]net.Conn
+type connEntry struct {
+	conn net.Conn
+	host string
+	port string
+	state int
+}
 
-func init() {
-	connMap = make(map[int]net.Conn)
+type destEntry struct {
+	dest string
+	free []*connEntry
+	used []*connEntry
+	rwlock *sync.RWMutex
+}
+
+func (entry *destEntry) getConn() net.Conn {
+	var conn net.Conn
+	entry.rwlock.Lock()
+	defer entry.rwlock.Unlock()
+	if len(entry.free) > 0 {
+		var front *connEntry
+		front, entry.free = entry.free[0], entry.free[1:]
+		front.state = 1
+		entry.used = append(entry.used, front)
+		conn = front.conn
+	} else {
+		conn, _ = net.DialTimeout("tcp", entry.dest, 10)
+		host, port, _ := net.SplitHostPort(entry.dest)
+		cEntry := &connEntry{
+			conn: conn,
+			host: host,
+			port: port,
+			state: 0,
+		}
+		entry.used = append(entry.used, cEntry)
+	}
+	return conn
+} 
+
+type ConnectionPoolFactory struct {
+	dests []string
+	destMap map[string]*destEntry
 }
 
 type ConnectionPool struct {
-	connId int
-	dests  []string
+	conn net.Conn
+	factory *ConnectionPoolFactory
 }
 
-func NewConnectionPool(dests []string) *ConnectionPool {
-	return &ConnectionPool{connId: -1, dests: dests}
+func NewConnectionPoolFactory(dests []string) *ConnectionPoolFactory {
+	return &ConnectionPoolFactory{dests: dests, destMap: make(map[string]*destEntry)}
 }
 
-func (cp *ConnectionPool) selectDest() string {
-	size := len(cp.dests)
+func (factory *ConnectionPoolFactory) Build() *ConnectionPool {
+	return &ConnectionPool{conn: nil, factory: factory}
+}
+
+func (factory *ConnectionPoolFactory) freeConn(conn net.Conn) {
+
+}
+
+func (factory *ConnectionPoolFactory) chooseDest() string {
+	size := len(factory.dests)
 	choice := rand.Intn(size)
-	return cp.dests[choice]
+	dest := factory.dests[choice]
+	return dest
+}
+
+func (factory *ConnectionPoolFactory) getConn() net.Conn {
+	dest := factory.chooseDest()
+	if dEntry, ok := factory.destMap[dest]; ok {
+		return dEntry.getConn()
+	}
+	dEntry := &destEntry {
+		dest: dest,
+		free: nil,
+		used: nil,
+		rwlock: new(sync.RWMutex),
+	}
+	factory.destMap[dest] = dEntry
+	return dEntry.getConn()
 }
 
 func (cp *ConnectionPool) getConn() net.Conn {
-	if connId := cp.connId; connId >= 0 {
-		return connMap[connId]
+	if conn:= cp.conn; conn != nil {
+		return conn
 	}
-	addr := cp.selectDest()
-	conn, _ := net.DialTimeout("tcp", addr, 10)
+	conn := cp.factory.getConn()
+	cp.conn = conn
 	return conn
 }
 
@@ -49,7 +111,11 @@ func (cp *ConnectionPool) Write(b []byte) (n int, err error) {
 // Close closes the connection.
 // Any blocked Read or Write operations will be unblocked and return errors.
 func (cp *ConnectionPool) Close() error {
-	return cp.getConn().Close()
+	if cp.conn != nil {
+		cp.factory.freeConn(cp.conn)
+		cp.conn = nil
+	}
+	return nil
 }
 
 // LocalAddr returns the local network address.
