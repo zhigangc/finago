@@ -8,15 +8,11 @@ import "time"
 
 type connEntry struct {
 	conn net.Conn
-	host string
-	port string
-	state int
+	waitQueue int
 }
 
 type destEntry struct {
 	dest string
-	free []*connEntry
-	used []*connEntry
 	rwlock *sync.RWMutex
 }
 
@@ -45,8 +41,7 @@ func (entry *destEntry) getConn() net.Conn {
 } 
 
 type ConnectionPoolFactory struct {
-	dests []string
-	destMap map[string]*destEntry
+	entries []*destEntry
 }
 
 type ConnectionPool struct {
@@ -55,7 +50,15 @@ type ConnectionPool struct {
 }
 
 func NewConnectionPoolFactory(dests []string) *ConnectionPoolFactory {
-	return &ConnectionPoolFactory{dests: dests, destMap: make(map[string]*destEntry)}
+	entries := make([]*destEntry, 0, len(dests))
+	for _, dest := range dests {
+		entry := &destEntry {
+			dest: dest,
+			rwlock: new(sync.RWMutex)
+		}
+		entries = append(entries, entry)
+	}
+	return &ConnectionPoolFactory{entries: entries}
 }
 
 func (factory *ConnectionPoolFactory) Build() *ConnectionPool {
@@ -66,8 +69,8 @@ func (factory *ConnectionPoolFactory) freeConn(conn net.Conn) {
 
 }
 
-func (factory *ConnectionPoolFactory) chooseDest() string {
-	size := len(factory.dests)
+func (factory *ConnectionPoolFactory) choose() *destEntry {
+	size := len(factory.entries)
 	choice := rand.Intn(size)
 	dest := factory.dests[choice]
 	return dest
