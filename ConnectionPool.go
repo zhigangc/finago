@@ -1,5 +1,6 @@
 package finago
 
+import "errors"
 import "net"
 import "math/rand"
 import "sync"
@@ -7,12 +8,28 @@ import "time"
 
 type destEntry struct {
 	dest           string
-	numConnCreated int
+	maxConnections int
+	numConnections int
 	numConnUsed    int
 	numPending     int
 	connQueue      chan net.Conn
 	rwLock         *sync.RWMutex
 	connectTimeout time.Duration
+	deadline       time.Time
+}
+
+func (entry *destEntry) getConnWithTimeout(deadline time.Time) (net.Conn, error) {
+	timeout := make(chan bool, 1)
+	go func() {
+		time.Sleep(time.Since(deadline))
+		timeout <- true
+	}()
+	select {
+	case conn := <-entry.connQueue:
+		return conn, nil
+	case <-timeout:
+		return nil, errors.New("timeout")
+	}
 }
 
 func (entry *destEntry) getConn() (net.Conn, error) {
@@ -22,13 +39,20 @@ func (entry *destEntry) getConn() (net.Conn, error) {
 	default:
 		//create a new connection next
 	}
+	entry.rwLock.RLock()
+	numConnections := entry.numConnections
+	entry.rwLock.RUnlock()
+
+	if numConnections >= entry.maxConnections {
+		return entry.getConnWithTimeout(entry.deadline)
+	}
 
 	conn, err := net.DialTimeout("tcp", entry.dest, entry.connectTimeout)
 	if err != nil {
 		return nil, err
 	}
 	entry.rwLock.Lock()
-	entry.numConnCreated += 1
+	entry.numConnections += 1
 	entry.numConnUsed += 1
 	entry.rwLock.Unlock()
 	return conn, nil
@@ -55,7 +79,8 @@ type ConnectionPool struct {
 func NewConnectionPoolFactory(
 	dests []string,
 	maxConnections int,
-	connectTimeout time.Duration) *ConnectionPoolFactory {
+	connectTimeout time.Duration,
+	deadline time.Time) *ConnectionPoolFactory {
 	entries := make([]*destEntry, 0, len(dests))
 	for _, dest := range dests {
 		entry := &destEntry{
@@ -63,6 +88,8 @@ func NewConnectionPoolFactory(
 			connQueue:      make(chan net.Conn, maxConnections),
 			rwLock:         new(sync.RWMutex),
 			connectTimeout: connectTimeout,
+			maxConnections: maxConnections,
+			deadline:       deadline,
 		}
 		entries = append(entries, entry)
 	}
