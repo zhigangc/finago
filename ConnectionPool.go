@@ -1,12 +1,9 @@
 package finago
 
-//import "fmt"
 import "net"
 import "math/rand"
 import "sync"
 import "time"
-
-const MaxConnections = 8
 
 type destEntry struct {
 	dest           string
@@ -15,6 +12,7 @@ type destEntry struct {
 	numPending     int
 	connQueue      chan net.Conn
 	rwLock         *sync.RWMutex
+	connectTimeout time.Duration
 }
 
 func (entry *destEntry) getConn() (net.Conn, error) {
@@ -22,7 +20,7 @@ func (entry *destEntry) getConn() (net.Conn, error) {
 		return conn, nil
 	}
 
-	conn, err := net.DialTimeout("tcp", entry.dest, 10)
+	conn, err := net.DialTimeout("tcp", entry.dest, entry.connectTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -51,17 +49,21 @@ type ConnectionPool struct {
 	factory *ConnectionPoolFactory
 }
 
-func NewConnectionPoolFactory(dests []string) *ConnectionPoolFactory {
+func NewConnectionPoolFactory(
+	dests []string,
+	maxConnections int,
+	connectTimeout time.Duration) *ConnectionPoolFactory {
 	entries := make([]*destEntry, 0, len(dests))
 	for _, dest := range dests {
-		connQueue := make(chan net.Conn, MaxConnections)
-		for i := 0; i < MaxConnections; i++ {
+		connQueue := make(chan net.Conn, maxConnections)
+		for i := 0; i < maxConnections; i++ {
 			connQueue <- nil
 		}
 		entry := &destEntry{
-			dest:      dest,
-			connQueue: connQueue,
-			rwLock:    new(sync.RWMutex),
+			dest:           dest,
+			connQueue:      connQueue,
+			rwLock:         new(sync.RWMutex),
+			connectTimeout: connectTimeout,
 		}
 		entries = append(entries, entry)
 	}
@@ -72,10 +74,6 @@ func (factory *ConnectionPoolFactory) Build() *ConnectionPool {
 	return &ConnectionPool{conn: nil, factory: factory}
 }
 
-func (factory *ConnectionPoolFactory) freeConn(conn net.Conn) {
-
-}
-
 func (factory *ConnectionPoolFactory) choose() *destEntry {
 	size := len(factory.entries)
 	choice := rand.Intn(size)
@@ -83,30 +81,37 @@ func (factory *ConnectionPoolFactory) choose() *destEntry {
 	return dEntry
 }
 
-func (factory *ConnectionPoolFactory) getDest() *destEntry {
-	return factory.choose()
-}
-
-func (cp *ConnectionPool) getConn() net.Conn {
+func (cp *ConnectionPool) getConn() (net.Conn, error) {
 	if conn := cp.conn; conn != nil {
-		return conn
+		return conn, nil
 	}
-	dEntry := cp.factory.getDest()
-	conn, _ := dEntry.getConn()
+	dEntry := cp.factory.choose()
+	conn, err := dEntry.getConn()
+	if err != nil {
+		return nil, err
+	}
 	cp.conn = conn
 	cp.dEntry = dEntry
-	return conn
+	return conn, nil
 }
 
 func (cp *ConnectionPool) Read(b []byte) (n int, err error) {
-	return cp.getConn().Read(b)
+	conn, err := cp.getConn()
+	if err != nil {
+		return 0, err
+	}
+	return conn.Read(b)
 }
 
 // Write writes data to the connection.
 // Write can be made to time out and return a Error with Timeout() == true
 // after a fixed time limit; see SetDeadline and SetWriteDeadline.
 func (cp *ConnectionPool) Write(b []byte) (n int, err error) {
-	return cp.getConn().Write(b)
+	conn, err := cp.getConn()
+	if err != nil {
+		return 0, err
+	}
+	return conn.Write(b)
 }
 
 // Close closes the connection.
@@ -125,12 +130,20 @@ func (cp *ConnectionPool) Close() error {
 
 // LocalAddr returns the local network address.
 func (cp *ConnectionPool) LocalAddr() net.Addr {
-	return cp.getConn().LocalAddr()
+	conn, err := cp.getConn()
+	if err != nil {
+		return nil
+	}
+	return conn.LocalAddr()
 }
 
 // RemoteAddr returns the remote network address.
 func (cp *ConnectionPool) RemoteAddr() net.Addr {
-	return cp.getConn().RemoteAddr()
+	conn, err := cp.getConn()
+	if err != nil {
+		return nil
+	}
+	return conn.RemoteAddr()
 }
 
 // SetDeadline sets the read and write deadlines associated
@@ -147,13 +160,21 @@ func (cp *ConnectionPool) RemoteAddr() net.Addr {
 //
 // A zero value for t means I/O operations will not time out.
 func (cp *ConnectionPool) SetDeadline(t time.Time) error {
-	return cp.getConn().SetDeadline(t)
+	conn, err := cp.getConn()
+	if err != nil {
+		return err
+	}
+	return conn.SetDeadline(t)
 }
 
 // SetReadDeadline sets the deadline for future Read calls.
 // A zero value for t means Read will not time out.
 func (cp *ConnectionPool) SetReadDeadline(t time.Time) error {
-	return cp.getConn().SetReadDeadline(t)
+	conn, err := cp.getConn()
+	if err != nil {
+		return err
+	}
+	return conn.SetReadDeadline(t)
 }
 
 // SetWriteDeadline sets the deadline for future Write calls.
@@ -161,5 +182,9 @@ func (cp *ConnectionPool) SetReadDeadline(t time.Time) error {
 // some of the data was successfully written.
 // A zero value for t means Write will not time out.
 func (cp *ConnectionPool) SetWriteDeadline(t time.Time) error {
-	return cp.getConn().SetWriteDeadline(t)
+	conn, err := cp.getConn()
+	if err != nil {
+		return err
+	}
+	return conn.SetWriteDeadline(t)
 }
