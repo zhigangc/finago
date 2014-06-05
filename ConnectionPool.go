@@ -18,6 +18,9 @@ type destEntry struct {
 }
 
 func (entry *destEntry) waitForConn(deadline time.Time) (net.Conn, error) {
+	if deadline.Before(time.Now()) {
+		return nil, errors.New("timeout")
+	}
 	timeout := make(chan bool, 1)
 	go func() {
 		time.Sleep(time.Since(deadline))
