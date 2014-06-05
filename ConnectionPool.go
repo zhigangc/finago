@@ -16,8 +16,11 @@ type destEntry struct {
 }
 
 func (entry *destEntry) getConn() (net.Conn, error) {
-	if conn := <-entry.connQueue; conn != nil {
+	select {
+	case conn := <-entry.connQueue:
 		return conn, nil
+	default:
+		//create a new connection next
 	}
 
 	conn, err := net.DialTimeout("tcp", entry.dest, entry.connectTimeout)
@@ -55,13 +58,9 @@ func NewConnectionPoolFactory(
 	connectTimeout time.Duration) *ConnectionPoolFactory {
 	entries := make([]*destEntry, 0, len(dests))
 	for _, dest := range dests {
-		connQueue := make(chan net.Conn, maxConnections)
-		for i := 0; i < maxConnections; i++ {
-			connQueue <- nil
-		}
 		entry := &destEntry{
 			dest:           dest,
-			connQueue:      connQueue,
+			connQueue:      make(chan net.Conn, maxConnections),
 			rwLock:         new(sync.RWMutex),
 			connectTimeout: connectTimeout,
 		}
