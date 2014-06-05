@@ -6,55 +6,62 @@ import "math/rand"
 import "sync"
 import "time"
 
-type connEntry struct {
-	conn net.Conn
-	waitQueue int
-}
+const MaxConnections = 8
 
 type destEntry struct {
-	dest string
-	rwlock *sync.RWMutex
+	dest           string
+	numConnCreated int
+	numConnUsed    int
+	numPending     int
+	connQueue      chan net.Conn
+	rwLock         *sync.RWMutex
 }
 
-func (entry *destEntry) getConn() net.Conn {
-	var conn net.Conn
-	entry.rwlock.Lock()
-	defer entry.rwlock.Unlock()
-	if len(entry.free) > 0 {
-		var front *connEntry
-		front, entry.free = entry.free[0], entry.free[1:]
-		front.state = 1
-		entry.used = append(entry.used, front)
-		conn = front.conn
-	} else {
-		conn, _ = net.DialTimeout("tcp", entry.dest, 10)
-		host, port, _ := net.SplitHostPort(entry.dest)
-		cEntry := &connEntry{
-			conn: conn,
-			host: host,
-			port: port,
-			state: 0,
-		}
-		entry.used = append(entry.used, cEntry)
+func (entry *destEntry) getConn() (net.Conn, error) {
+	if conn := <-entry.connQueue; conn != nil {
+		return conn, nil
 	}
-	return conn
-} 
+
+	conn, err := net.DialTimeout("tcp", entry.dest, 10)
+	if err != nil {
+		return nil, err
+	}
+	entry.rwLock.Lock()
+	entry.numConnCreated += 1
+	entry.numConnUsed += 1
+	entry.rwLock.Unlock()
+	return conn, nil
+}
+
+func (entry *destEntry) free(conn net.Conn) error {
+	entry.connQueue <- conn
+	entry.rwLock.Lock()
+	entry.numConnUsed -= 1
+	entry.rwLock.Unlock()
+	return nil
+}
 
 type ConnectionPoolFactory struct {
 	entries []*destEntry
 }
 
 type ConnectionPool struct {
-	conn net.Conn
+	conn    net.Conn
+	dEntry  *destEntry
 	factory *ConnectionPoolFactory
 }
 
 func NewConnectionPoolFactory(dests []string) *ConnectionPoolFactory {
 	entries := make([]*destEntry, 0, len(dests))
 	for _, dest := range dests {
-		entry := &destEntry {
-			dest: dest,
-			rwlock: new(sync.RWMutex)
+		connQueue := make(chan net.Conn, MaxConnections)
+		for i := 0; i < MaxConnections; i++ {
+			connQueue <- nil
+		}
+		entry := &destEntry{
+			dest:      dest,
+			connQueue: connQueue,
+			rwLock:    new(sync.RWMutex),
 		}
 		entries = append(entries, entry)
 	}
@@ -72,31 +79,22 @@ func (factory *ConnectionPoolFactory) freeConn(conn net.Conn) {
 func (factory *ConnectionPoolFactory) choose() *destEntry {
 	size := len(factory.entries)
 	choice := rand.Intn(size)
-	dest := factory.dests[choice]
-	return dest
+	dEntry := factory.entries[choice]
+	return dEntry
 }
 
-func (factory *ConnectionPoolFactory) getConn() net.Conn {
-	dest := factory.chooseDest()
-	if dEntry, ok := factory.destMap[dest]; ok {
-		return dEntry.getConn()
-	}
-	dEntry := &destEntry {
-		dest: dest,
-		free: nil,
-		used: nil,
-		rwlock: new(sync.RWMutex),
-	}
-	factory.destMap[dest] = dEntry
-	return dEntry.getConn()
+func (factory *ConnectionPoolFactory) getDest() *destEntry {
+	return factory.choose()
 }
 
 func (cp *ConnectionPool) getConn() net.Conn {
-	if conn:= cp.conn; conn != nil {
+	if conn := cp.conn; conn != nil {
 		return conn
 	}
-	conn := cp.factory.getConn()
+	dEntry := cp.factory.getDest()
+	conn, _ := dEntry.getConn()
 	cp.conn = conn
+	cp.dEntry = dEntry
 	return conn
 }
 
@@ -114,8 +112,12 @@ func (cp *ConnectionPool) Write(b []byte) (n int, err error) {
 // Close closes the connection.
 // Any blocked Read or Write operations will be unblocked and return errors.
 func (cp *ConnectionPool) Close() error {
-	if cp.conn != nil {
-		cp.factory.freeConn(cp.conn)
+	if cp.conn != nil && cp.dEntry != nil {
+		cp.dEntry.free(cp.conn)
+		cp.dEntry = nil
+		cp.conn = nil
+	} else if cp.conn != nil {
+		cp.conn.Close()
 		cp.conn = nil
 	}
 	return nil
