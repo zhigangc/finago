@@ -89,7 +89,7 @@ func (s *Service) SetHeatBeatInterval(millisecond int) {
 	s.config.HartBeatInterval = time.Duration(millisecond) * time.Millisecond
 }
 
-// service pool?
+//ToDo: return dest for connectionPool
 // return a list of services
 func GetAvailableServices(serviceName string, etcdClient *etcd.Client) (serviceList []*Service, err error) {
 

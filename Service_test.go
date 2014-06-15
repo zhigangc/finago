@@ -8,4 +8,6 @@ import (
 func TestService(t *testing.T) {
 	machines := []string{}
 	etcd.NewClient(machines)
+
+	//test announcement on etcd
 }
