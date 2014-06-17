@@ -13,7 +13,7 @@ import (
 
 type Service struct {
 	Name string
-	IP   string
+	Dst  string
 	Port string
 
 	config  Config
@@ -41,7 +41,7 @@ func NewSerivce(serviceName, ipaddr, port string, etcdClient *etcd.Client) *Serv
 
 // key format /serviceName/IP+port
 func (s *Service) getKeyName() string {
-	return "/" + s.Name + "/" + s.IP + ":" + s.Port
+	return "/" + s.Name + "/" + s.Dst + ":" + s.Port
 }
 
 // announce service to etcd
@@ -57,7 +57,7 @@ func (s *Service) Announce() (err error) {
 
 	// start heartbeat
 	tick := time.Tick(s.config.HartBeatInterval)
-	go s.HeartBeat(tick)
+	go s.heartBeat(tick)
 
 	return
 }
@@ -68,7 +68,7 @@ func (s *Service) Close() {
 	s.stop <- true
 }
 
-func (s *Service) HeartBeat(tick <-chan time.Time) {
+func (s *Service) heartBeat(tick <-chan time.Time) {
 	// reset TTL
 	for {
 		select {
@@ -99,10 +99,24 @@ func GetAvailableServices(serviceName string, etcdClient *etcd.Client) (serviceL
 		return
 	}
 	for _, node := range response.Node.Nodes {
-		res := strings.Split(node.Key, ":") // ip and port
+		res := strings.Split(node.Key, ":") // dstination and port
 		ipaddr, port := res[0], res[1]
 		s := NewSerivce(serviceName, ipaddr, port, etcdClient)
 		serviceList = append(serviceList, s)
+	}
+
+	return
+}
+
+func getDestsByService(serviceName string, etcdClient *etcd.Client) (dsts []string, err error) {
+	serviceLst, err := GetAvailableServices(serviceName, etcdClient)
+
+	if err != nil {
+		return
+	}
+
+	for _, service := range serviceLst {
+		dsts = append(dsts, service.Dst+":"+service.Port)
 	}
 
 	return
